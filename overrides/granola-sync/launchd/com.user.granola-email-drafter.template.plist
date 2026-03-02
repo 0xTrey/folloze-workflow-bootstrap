@@ -1,0 +1,38 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <!-- Replace placeholders before loading:
+       __LABEL__      e.g. com.candace.granola-email-drafter
+       __HOME__       e.g. /Users/candace
+       __PYTHON_BIN__ e.g. /opt/homebrew/opt/python@3.13/libexec/bin/python3
+  -->
+  <key>Label</key>
+  <string>__LABEL__</string>
+
+  <key>ProgramArguments</key>
+  <array>
+    <string>/bin/zsh</string>
+    <string>-lc</string>
+    <string>GEMINI_KEY=$(security find-generic-password -s 'gemini-api' -w 2>/dev/null); if [ -z "$GEMINI_KEY" ]; then echo 'Missing keychain secret: gemini-api' 1>/dev/stderr; exit 1; fi; export AI_GEMINI_KEY="$GEMINI_KEY" GEMINI_API_KEY="$GEMINI_KEY"; exec __PYTHON_BIN__ __HOME__/Projects/granola-sync/granola_email_drafter.py run --json</string>
+  </array>
+
+  <key>RunAtLoad</key>
+  <true/>
+  <key>StartInterval</key>
+  <integer>1800</integer>
+
+  <key>StandardOutPath</key>
+  <string>__HOME__/Library/Logs/granola-sync/email-drafter.log</string>
+  <key>StandardErrorPath</key>
+  <string>__HOME__/Library/Logs/granola-sync/email-drafter.err.log</string>
+
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>HOME</key>
+    <string>__HOME__</string>
+    <key>PATH</key>
+    <string>/opt/homebrew/opt/python@3.13/libexec/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string>
+  </dict>
+</dict>
+</plist>

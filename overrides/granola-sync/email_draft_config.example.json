@@ -1,0 +1,18 @@
+{
+  "internal_domains": ["folloze.com"],
+  "ignore_domains": ["resource.calendar.google.com"],
+  "delay_minutes": 60,
+  "lookback_days": 7,
+  "min_context_chars": 180,
+  "max_context_chars": 12000,
+  "llm_profiles": ["strategic"],
+  "llm_model": null,
+  "temperature": 0.2,
+  "max_tokens": 1400,
+  "sender_name": "Trey",
+  "signature": "Best,\nTrey",
+  "tone": "Warm, concise, action-oriented, and professional.",
+  "to_mode": "all_external",
+  "max_external_recipients": 4,
+  "dry_run_dir": "~/Documents/granola-email-drafts"
+}
