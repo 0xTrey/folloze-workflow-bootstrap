@@ -48,7 +48,6 @@ clone_or_pull "granola-sync" "https://github.com/0xTrey/granola-sync.git"
 clone_or_pull "weekly-report" "https://github.com/0xTrey/weekly-report.git"
 clone_or_pull "google-workspace" "https://github.com/0xTrey/google-workspace.git"
 clone_or_pull "granola-reader" "https://github.com/0xTrey/granola-reader.git"
-clone_or_pull "llm-gateway" "https://github.com/0xTrey/llm-gateway.git"
 
 echo
 echo "[override] Applying portable code overrides"
@@ -61,7 +60,6 @@ python3 -m venv "$VENV_PATH"
 source "$VENV_PATH/bin/activate"
 pip install --upgrade pip
 pip install -e "$PROJECTS_ROOT/google-workspace"
-pip install -e "$PROJECTS_ROOT/llm-gateway"
 pip install -e "$PROJECTS_ROOT/granola-reader"
 pip install -r "$PROJECTS_ROOT/deal-research/requirements.txt"
 pip install -r "$PROJECTS_ROOT/watch-tomorrow-meetings/requirements.txt"
@@ -70,7 +68,7 @@ echo
 echo "[config] Writing Gemini-only drafter config"
 cat > "$PROJECTS_ROOT/granola-sync/email_draft_config.json" <<'JSON'
 {
-  "llm_profiles": ["strategic"],
+  "llm_profiles": ["gemini"],
   "llm_model": null
 }
 JSON

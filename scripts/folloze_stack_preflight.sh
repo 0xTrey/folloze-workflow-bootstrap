@@ -111,7 +111,6 @@ check_file "$PROJECTS_ROOT/granola-sync/granola_sync.py"
 check_file "$PROJECTS_ROOT/granola-sync/granola_email_drafter.py"
 check_file "$PROJECTS_ROOT/google-workspace/google_workspace/auth.py"
 check_file "$PROJECTS_ROOT/granola-reader/granola_reader.py"
-check_file "$PROJECTS_ROOT/llm-gateway/pyproject.toml"
 
 printf '\n# Optional index-backed workflow\n'
 check_optional_file "$PROJECTS_ROOT/deal-notes-index/deal_notes_index.py"
@@ -138,11 +137,6 @@ fi
 
 printf '\n# Keychain secrets used by automations\n'
 check_keychain_secret "gemini-api"
-if security find-generic-password -s "nvidia-api" -w >/dev/null 2>&1; then
-  ok "keychain secret present: nvidia-api"
-else
-  warn "keychain secret missing: nvidia-api (optional in Gemini-only mode)"
-fi
 
 printf '\n# LaunchAgents\n'
 check_launch_suffix "deal-research-nightly-runner"

@@ -24,6 +24,8 @@ from email.mime.text import MIMEText
 from pathlib import Path
 from typing import Optional
 
+import requests
+
 DEFAULT_CONFIG_PATH = Path(__file__).parent / "email_draft_config.json"
 EXPORT_DIR = Path.home() / "Documents" / "granola-exports"
 DEFAULT_STATE_PATH = EXPORT_DIR / ".email-draft-state.json"
@@ -51,7 +53,7 @@ DEFAULT_CONFIG = {
     "lookback_days": 7,
     "min_context_chars": 180,
     "max_context_chars": 12000,
-    "llm_profiles": ["strategic", "local", "nvidia"],
+    "llm_profiles": ["gemini"],
     "llm_model": None,
     "temperature": 0.2,
     "max_tokens": 1400,
@@ -337,47 +339,68 @@ def _build_prompts(
     return system_prompt, user_prompt
 
 
-def _llm_json(config: dict, system_prompt: str, user_prompt: str) -> tuple[dict, str]:
-    try:
-        from llm_gateway import LLMGateway
-    except Exception as exc:
-        raise RuntimeError(
-            "llm-gateway is not available. Install with: pip install -e ~/Projects/llm-gateway"
-        ) from exc
+def _gemini_key() -> str:
+    for key_name in ("GEMINI_API_KEY", "AI_GEMINI_KEY", "GOOGLE_API_KEY"):
+        value = (os.environ.get(key_name) or "").strip()
+        if value:
+            return value
+    raise RuntimeError(
+        "Missing Gemini API key. Set GEMINI_API_KEY or AI_GEMINI_KEY (or GOOGLE_API_KEY)."
+    )
 
-    profiles = config.get("llm_profiles") or ["strategic", "local", "nvidia"]
-    model_override = config.get("llm_model")
+
+def _gemini_text(*, model: str, system_prompt: str, user_prompt: str, temperature: float, max_tokens: int) -> str:
+    api_key = _gemini_key()
+    endpoint = (
+        f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={api_key}"
+    )
+    payload = {
+        "systemInstruction": {"parts": [{"text": system_prompt}]},
+        "contents": [{"role": "user", "parts": [{"text": user_prompt}]}],
+        "generationConfig": {
+            "temperature": temperature,
+            "maxOutputTokens": max_tokens,
+            "responseMimeType": "application/json",
+        },
+    }
+    response = requests.post(endpoint, json=payload, timeout=60)
+    if response.status_code >= 400:
+        raise RuntimeError(f"Gemini API error {response.status_code}: {response.text[:300]}")
+
+    try:
+        data = response.json()
+    except Exception as exc:
+        raise RuntimeError(f"Gemini response was not JSON: {exc}") from exc
+
+    candidates = data.get("candidates") or []
+    for candidate in candidates:
+        content = candidate.get("content") or {}
+        for part in content.get("parts") or []:
+            text = (part.get("text") or "").strip()
+            if text:
+                return text
+    raise RuntimeError("Gemini returned no text content")
+
+
+def _llm_json(config: dict, system_prompt: str, user_prompt: str) -> tuple[dict, str]:
+    model = (config.get("llm_model") or os.environ.get("GEMINI_MODEL") or "gemini-2.0-flash").strip()
     temperature = float(config.get("temperature", 0.2))
     max_tokens = int(config.get("max_tokens", 1400))
-    last_error = None
 
-    for index, profile in enumerate(profiles):
-        try:
-            model = model_override if (index == 0 and model_override) else None
-            gateway = LLMGateway(profile=profile, model=model)
-            text = gateway.chat(
-                [
-                    {"role": "system", "content": system_prompt},
-                    {"role": "user", "content": user_prompt},
-                ],
-                temperature=temperature,
-                max_tokens=max_tokens,
-            )
-            if not text:
-                raise RuntimeError("empty response")
+    text = _gemini_text(
+        model=model,
+        system_prompt=system_prompt,
+        user_prompt=user_prompt,
+        temperature=temperature,
+        max_tokens=max_tokens,
+    )
 
-            parsed = _parse_llm_json(text)
-            subject = (parsed.get("subject") or "").strip() if isinstance(parsed, dict) else ""
-            body = (parsed.get("body") or "").strip() if isinstance(parsed, dict) else ""
-            if subject and body:
-                return {"subject": subject, "body": body}, profile
-
-            raise RuntimeError("response missing required JSON fields")
-        except Exception as exc:
-            last_error = exc
-            log.warning("LLM profile %s failed: %s", profile, exc)
-
-    raise RuntimeError(f"All LLM profiles failed. Last error: {last_error}")
+    parsed = _parse_llm_json(text)
+    subject = (parsed.get("subject") or "").strip() if isinstance(parsed, dict) else ""
+    body = (parsed.get("body") or "").strip() if isinstance(parsed, dict) else ""
+    if not subject or not body:
+        raise RuntimeError("Gemini response missing required JSON fields: subject/body")
+    return {"subject": subject, "body": body}, "gemini"
 
 
 def _has_compose_scope(scopes: list[str]) -> bool:

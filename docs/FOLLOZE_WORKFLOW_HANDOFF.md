@@ -17,7 +17,6 @@ Clone these repos under `~/Projects`:
 - `https://github.com/0xTrey/weekly-report.git`
 - `https://github.com/0xTrey/google-workspace.git`
 - `https://github.com/0xTrey/granola-reader.git`
-- `https://github.com/0xTrey/llm-gateway.git`
 
 Clone this bootstrap repo to `~/Projects/folloze-workflow-bootstrap` and run stack scripts from that folder.
 
@@ -45,7 +44,6 @@ python3 -m venv ~/.venvs/folloze-stack
 source ~/.venvs/folloze-stack/bin/activate
 
 pip install -e ~/Projects/google-workspace
-pip install -e ~/Projects/llm-gateway
 pip install -e ~/Projects/granola-reader
 
 pip install -r ~/Projects/deal-research/requirements.txt
@@ -75,7 +73,7 @@ python3 ~/Projects/granola-sync/granola_email_drafter.py auth
 
 ## Gemini-only mode
 
-You can run Gemini for all LLM calls without NVIDIA or local Ollama, but keep `llm-gateway` installed because current scripts call its interface.
+This bootstrap is Gemini-native and does not require `llm-gateway`.
 
 Set:
 
@@ -86,12 +84,12 @@ For email drafts, create `~/Projects/granola-sync/email_draft_config.json`:
 
 ```json
 {
-  "llm_profiles": ["strategic"],
+  "llm_profiles": ["gemini"],
   "llm_model": null
 }
 ```
 
-If using launchd for email drafter, remove hard dependency on `nvidia-api` in the plist command.
+If using launchd for email drafter, only `gemini-api` keychain secret is required.
 
 ## Automations to install
 

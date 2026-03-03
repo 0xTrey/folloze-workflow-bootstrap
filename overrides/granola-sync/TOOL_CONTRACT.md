@@ -16,18 +16,16 @@ Output/state:
 
 - Python 3.11+
 - Granola export pipeline already running (`granola-sync`)
-- `llm-gateway` importable (recommended install):
-  - `pip install -e ~/Projects/llm-gateway`
 - Google auth client libraries available (typically via `google-workspace` install)
 
 ### Gemini-only runtime
 
-If you do not want local/Ollama or NVIDIA profiles, keep `llm-gateway` installed and configure:
+Use direct Gemini API auth:
 
 - `AI_GEMINI_KEY=<your key>` (or `GEMINI_API_KEY`)
-- `email_draft_config.json` with `"llm_profiles": ["strategic"]`
+- optional model override: `GEMINI_MODEL=gemini-2.0-flash`
 
-This keeps behavior deterministic for cloud-only usage.
+No `llm-gateway` dependency is required in this bootstrap variant.
 
 ## Responsibilities
 
@@ -96,5 +94,5 @@ This avoids mutating the shared read-oriented token used by `google-workspace`.
 ## launchd Notes
 
 - If scheduled with `launchd`, ensure the job environment includes required `AI_*` variables for cloud profiles.
-- For Gemini-only automation, set `llm_profiles` to `["strategic"]` and provide `AI_GEMINI_KEY`.
+- For Gemini-only automation, set `llm_profiles` to `["gemini"]` and provide `AI_GEMINI_KEY`.
 - Portable plist template: `launchd/com.user.granola-email-drafter.template.plist`
