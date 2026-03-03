@@ -18,6 +18,28 @@ cd folloze-workflow-bootstrap
 bash ./scripts/setup_fresh_mac.sh
 ```
 
+## Low-storage Mac (16GB) mode
+
+If the machine is space-constrained, run:
+
+```bash
+cd ~/Projects/folloze-workflow-bootstrap
+bash ./scripts/setup_low_storage_mac.sh
+```
+
+This mode:
+- uses shallow clones (`--depth 1 --filter=blob:none`)
+- skips `weekly-report` by default
+- installs Python deps with no pip cache
+
+If local disk is still too tight, put repos + venv on external/cloud-backed volume:
+
+```bash
+PROJECTS_ROOT=/Volumes/WorkDrive/Projects \
+VENV_PATH=/Volumes/WorkDrive/.venvs/folloze-stack \
+bash ./scripts/setup_low_storage_mac.sh
+```
+
 ## Codex handoff
 
 If Candace is using Codex directly, have her paste:
@@ -44,6 +66,7 @@ These cannot be fully automated from a clean machine:
 ## Primary scripts
 
 - `scripts/setup_fresh_mac.sh`
+- `scripts/setup_low_storage_mac.sh`
 - `scripts/install_folloze_launchagents.sh`
 - `scripts/folloze_stack_preflight.sh`
 - `scripts/apply_repo_overrides.sh`

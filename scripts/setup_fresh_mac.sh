@@ -8,8 +8,32 @@ LABEL_PREFIX="${LABEL_PREFIX:-com.${USER:-$(id -un)}}"
 AUTO_LOAD="${AUTO_LOAD:-1}"
 RUN_PREFLIGHT="${RUN_PREFLIGHT:-1}"
 VENV_PATH="${VENV_PATH:-$HOME/.venvs/folloze-stack}"
+LOW_STORAGE_MODE="${LOW_STORAGE_MODE:-0}"
+SKIP_WEEKLY_REPORT="${SKIP_WEEKLY_REPORT:-}"
+
+if [ -z "$SKIP_WEEKLY_REPORT" ]; then
+  if [ "$LOW_STORAGE_MODE" = "1" ]; then
+    SKIP_WEEKLY_REPORT="1"
+  else
+    SKIP_WEEKLY_REPORT="0"
+  fi
+fi
 
 mkdir -p "$PROJECTS_ROOT"
+
+check_free_space() {
+  local target_dir="$1"
+  local required_gb="$2"
+  local avail_kb
+  avail_kb="$(df -Pk "$target_dir" | awk 'NR==2 {print $4}')"
+  local required_kb=$((required_gb * 1024 * 1024))
+  if [ "$avail_kb" -lt "$required_kb" ]; then
+    echo "[disk] Not enough free space in $target_dir. Need ~${required_gb}GB+ free for setup." >&2
+    echo "[disk] Free now: $((avail_kb / 1024 / 1024))GB" >&2
+    echo "[disk] Try LOW_STORAGE_MODE=1 and/or put PROJECTS_ROOT + VENV_PATH on external/cloud volume." >&2
+    exit 1
+  fi
+}
 
 clone_or_pull() {
   local name="$1"
@@ -24,6 +48,9 @@ clone_or_pull() {
       git -C "$dest" pull --ff-only origin "$branch" || {
         echo "[repo] pull failed for $name (continuing)"
       }
+      if [ "$LOW_STORAGE_MODE" = "1" ]; then
+        git -C "$dest" gc --prune=now >/dev/null 2>&1 || true
+      fi
     else
       echo "[repo] no origin remote for $name (skipping pull)"
     fi
@@ -32,20 +59,41 @@ clone_or_pull() {
     exit 1
   else
     echo "[repo] Cloning $name"
-    git clone "$url" "$dest"
+    if [ "$LOW_STORAGE_MODE" = "1" ]; then
+      git clone --depth 1 --single-branch --filter=blob:none "$url" "$dest"
+    else
+      git clone "$url" "$dest"
+    fi
   fi
 }
 
 echo "== Folloze Fresh-Mac Setup =="
 echo "STACK_ROOT=$STACK_ROOT"
 echo "PROJECTS_ROOT=$PROJECTS_ROOT"
+echo "VENV_PATH=$VENV_PATH"
+echo "LOW_STORAGE_MODE=$LOW_STORAGE_MODE"
+echo "SKIP_WEEKLY_REPORT=$SKIP_WEEKLY_REPORT"
 echo
+
+if [ "$LOW_STORAGE_MODE" = "1" ]; then
+  mkdir -p "$(dirname "$VENV_PATH")"
+  check_free_space "$PROJECTS_ROOT" 2
+  check_free_space "$(dirname "$VENV_PATH")" 2
+else
+  mkdir -p "$(dirname "$VENV_PATH")"
+  check_free_space "$PROJECTS_ROOT" 4
+  check_free_space "$(dirname "$VENV_PATH")" 4
+fi
 
 clone_or_pull "deal-research-nightly-runner" "https://github.com/0xTrey/deal-research-nightly-runner.git"
 clone_or_pull "deal-research" "https://github.com/0xTrey/deal-research.git"
 clone_or_pull "watch-tomorrow-meetings" "https://github.com/0xTrey/watch-tomorrow-meetings.git"
 clone_or_pull "granola-sync" "https://github.com/0xTrey/granola-sync.git"
-clone_or_pull "weekly-report" "https://github.com/0xTrey/weekly-report.git"
+if [ "$SKIP_WEEKLY_REPORT" != "1" ]; then
+  clone_or_pull "weekly-report" "https://github.com/0xTrey/weekly-report.git"
+else
+  echo "[repo] Skipping weekly-report clone"
+fi
 clone_or_pull "google-workspace" "https://github.com/0xTrey/google-workspace.git"
 clone_or_pull "granola-reader" "https://github.com/0xTrey/granola-reader.git"
 
@@ -58,11 +106,14 @@ echo "[python] Preparing virtualenv at $VENV_PATH"
 python3 -m venv "$VENV_PATH"
 # shellcheck disable=SC1090
 source "$VENV_PATH/bin/activate"
-pip install --upgrade pip
-pip install -e "$PROJECTS_ROOT/google-workspace"
-pip install -e "$PROJECTS_ROOT/granola-reader"
-pip install -r "$PROJECTS_ROOT/deal-research/requirements.txt"
-pip install -r "$PROJECTS_ROOT/watch-tomorrow-meetings/requirements.txt"
+PIP_NO_CACHE_DIR=1 pip install --upgrade pip
+PIP_NO_CACHE_DIR=1 pip install -e "$PROJECTS_ROOT/google-workspace"
+PIP_NO_CACHE_DIR=1 pip install -e "$PROJECTS_ROOT/granola-reader"
+PIP_NO_CACHE_DIR=1 pip install -r "$PROJECTS_ROOT/deal-research/requirements.txt"
+PIP_NO_CACHE_DIR=1 pip install -r "$PROJECTS_ROOT/watch-tomorrow-meetings/requirements.txt"
+if [ "$LOW_STORAGE_MODE" = "1" ]; then
+  rm -rf "$HOME/Library/Caches/pip" >/dev/null 2>&1 || true
+fi
 
 echo
 echo "[config] Writing Gemini-only drafter config"
@@ -90,7 +141,7 @@ if [ "$RUN_PREFLIGHT" = "1" ]; then
   fi
 fi
 
-cat <<'EOF'
+cat <<'EOF2'
 
 Manual steps still required:
 1. Set env vars in ~/.zshrc:
@@ -108,4 +159,4 @@ Manual steps still required:
    python3 $STACK_ROOT/skills/granola-to-deals/granola_to_deals.py --days 4 --dry-run --target zilliant.com
    python3 ~/Projects/watch-tomorrow-meetings/watch_tomorrow_meetings.py --json --dry-run
    python3 ~/Projects/granola-sync/granola_email_drafter.py status --json
-EOF
+EOF2

@@ -27,7 +27,10 @@ Steps:
 
 2. Run bootstrap:
    cd ~/Projects/folloze-workflow-bootstrap
-   bash ./scripts/setup_fresh_mac.sh
+   # If local disk is tight (16GB Mac), prefer:
+   bash ./scripts/setup_low_storage_mac.sh
+   # Standard mode:
+   # bash ./scripts/setup_fresh_mac.sh
 
 3. If bootstrap reports missing secrets/auth, complete these:
    - Add env vars in ~/.zshrc:
