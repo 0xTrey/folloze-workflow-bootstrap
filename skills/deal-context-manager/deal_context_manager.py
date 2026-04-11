@@ -31,6 +31,7 @@ from google.auth.transport.requests import Request
 
 DEFAULT_TOKEN_PATH = Path.home() / ".config" / "openclaw" / "google" / "token.json"
 INDEX_PATH = Path.home() / ".openclaw" / "deal-index.json"
+ALIAS_PATH = Path.home() / ".openclaw" / "domain-aliases.json"
 
 # Patterns to identify deal docs
 DEAL_DOC_PATTERNS = [
@@ -39,12 +40,48 @@ DEAL_DOC_PATTERNS = [
 ]
 
 
+def _normalize_domain(value: str) -> str:
+    """Normalize domain-like strings (strip scheme/path/query/port/www)."""
+    if not value:
+        return ""
+    v = value.strip().lower()
+    if '@' in v and ' ' not in v:
+        v = v.split('@', 1)[1]
+    v = re.sub(r'^https?://', '', v)
+    v = v.split('/', 1)[0]
+    v = v.split('?', 1)[0]
+    v = v.split('#', 1)[0]
+    v = v.split(':', 1)[0]
+    if v.startswith('www.'):
+        v = v[4:]
+    return v.strip('.')
+
+
+def _domain_root(value: str) -> str:
+    """Best-effort registrable root (heuristic)."""
+    d = _normalize_domain(value)
+    parts = [p for p in d.split('.') if p]
+    if len(parts) >= 2:
+        return '.'.join(parts[-2:])
+    return d
+
+
+def _company_tokens(value: str) -> List[str]:
+    """Tokenize company text for fuzzy matching."""
+    stop = {'inc', 'llc', 'ltd', 'corp', 'co', 'company', 'group', 'the', 'partner', 'partners'}
+    return [t for t in re.split(r'[^a-z0-9]+', (value or '').lower()) if t and t not in stop]
+
+
+def _compact_text(value: str) -> str:
+    return re.sub(r'[^a-z0-9]+', '', (value or '').lower())
+
+
 def get_drive_service(token_path: Optional[Path] = None):
     """Initialize Drive API service."""
     token_path = token_path or DEFAULT_TOKEN_PATH
     creds = Credentials.from_authorized_user_file(
         str(token_path),
-        ["https://www.googleapis.com/auth/drive"]
+        ["https://www.googleapis.com/auth/drive.readonly"]
     )
     if creds.expired and creds.refresh_token:
         creds.refresh(Request())
@@ -69,10 +106,10 @@ class Deal:
     doc_id: str
     name: str
     domain: str
-    folder_id: str
-    folder_path: str
-    created_time: str
-    modified_time: str
+    folder_id: str = ""
+    folder_path: str = ""
+    created_time: str = ""
+    modified_time: str = ""
     status: str = "active"
     last_accessed: Optional[str] = None
     
@@ -95,7 +132,9 @@ class DealContextManager:
         self.drive_service = None
         self.docs_service = None
         self.index: Dict[str, Deal] = {}  # domain -> Deal
+        self.alias_map: Dict[str, str] = {}
         self._load_index()
+        self._load_aliases()
     
     def _get_drive(self):
         """Lazy init Drive service."""
@@ -136,6 +175,31 @@ class DealContextManager:
         with open(INDEX_PATH, 'w') as f:
             json.dump(data, f, indent=2, default=str)
         print(f"💾 Saved {len(self.index)} deals to index")
+
+    def _load_aliases(self):
+        """Load optional domain alias map (query_domain -> canonical_domain)."""
+        self.alias_map = {}
+        if not ALIAS_PATH.exists():
+            return
+        try:
+            payload = json.loads(ALIAS_PATH.read_text())
+        except Exception as e:
+            print(f"⚠️  Failed to load alias map: {e}")
+            return
+
+        aliases = payload.get('aliases', payload if isinstance(payload, dict) else {})
+        if not isinstance(aliases, dict):
+            print("⚠️  Alias map format invalid; expected dict or {'aliases': {...}}")
+            return
+
+        for src, dst in aliases.items():
+            src_n = _normalize_domain(str(src))
+            dst_n = _normalize_domain(str(dst))
+            if src_n and dst_n:
+                self.alias_map[src_n] = dst_n
+
+        if self.alias_map:
+            print(f"🧭 Loaded {len(self.alias_map)} domain alias(es)")
     
     def _extract_company_name(self, filename: str) -> Optional[str]:
         """Extract company name from deal doc filename."""
@@ -275,31 +339,188 @@ class DealContextManager:
         return len(new_index)
     
     def find_deal(self, query: str) -> Optional[Deal]:
-        """Find deal by domain or company name."""
-        query = query.lower().strip()
-        
-        # Exact domain match
-        if query in self.index:
-            return self.index[query]
-        
-        # Try domain without TLD
+        """Find deal by domain or company name with normalization/fuzzy matching."""
+        q_raw = (query or '').strip().lower()
+        q_domain = _normalize_domain(q_raw)
+        q_root = _domain_root(q_domain)
+        q_label = q_root.split('.', 1)[0] if q_root else ''
+        q_compact = _compact_text(q_raw)
+
+        # Optional explicit aliasing (non-exclusive): query domain -> canonical domain.
+        alias_domain = self.alias_map.get(q_domain, "") if q_domain else ""
+        alias_root = _domain_root(alias_domain) if alias_domain else ""
+
+        candidates: Dict[str, Tuple[int, Deal]] = {}
+
+        def add_candidate(deal: Deal, score: int):
+            key = deal.domain
+            existing = candidates.get(key)
+            if not existing or score > existing[0]:
+                candidates[key] = (score, deal)
+
+        # Strong exact candidates first
+        if q_raw in self.index:
+            add_candidate(self.index[q_raw], 500)
+        if q_domain in self.index:
+            add_candidate(self.index[q_domain], 490)
+        if alias_domain and alias_domain in self.index:
+            add_candidate(self.index[alias_domain], 505)
+
         for domain, deal in self.index.items():
-            if domain.replace('.com', '').replace('.ai', '') == query:
-                return deal
-        
-        # Company name match
-        for domain, deal in self.index.items():
-            if deal.name.lower() == query:
-                return deal
-            if query in deal.name.lower():
-                return deal
-        
-        # Fuzzy match
-        for domain, deal in self.index.items():
-            if query in domain or query in deal.name.lower():
-                return deal
-        
-        return None
+            domain_norm = _normalize_domain(domain)
+            d_root = _domain_root(domain)
+            d_label = d_root.split('.', 1)[0] if d_root else ''
+            deal_name = (deal.name or '').lower()
+            deal_compact = _compact_text(deal_name)
+
+            # Normalized exact domain
+            if q_domain and q_domain == domain_norm:
+                add_candidate(deal, 480)
+
+            # Root-domain matching (amazon.com -> aws.amazon.com, cbre.com -> cbre.us)
+            if q_root and q_root == d_root:
+                add_candidate(deal, 420)
+            if alias_root and alias_root == d_root:
+                add_candidate(deal, 470)
+
+            # Prefix-domain fuzzy (nucleussecurity.com -> nucleussec.com)
+            if q_label and d_label and len(q_label) >= 6 and len(d_label) >= 6:
+                if q_label.startswith(d_label) or d_label.startswith(q_label):
+                    add_candidate(deal, 360)
+
+            # Company name matching
+            if deal_name and deal_name == q_raw:
+                add_candidate(deal, 430)
+            if q_raw and deal_name and q_raw in deal_name:
+                add_candidate(deal, 320)
+
+            # Compact fuzzy name matching ("the marketing practice" ~ "themarketingpractice")
+            if q_compact and deal_compact and (q_compact in deal_compact or deal_compact in q_compact):
+                add_candidate(deal, 300)
+
+            # Domain substring fallback
+            if q_domain and (q_domain in domain_norm or domain_norm in q_domain):
+                add_candidate(deal, 280)
+
+        # Token overlap fallback
+        q_tokens = set(_company_tokens(q_raw if q_raw else q_domain))
+        if q_tokens:
+            for _, deal in self.index.items():
+                d_tokens = set(_company_tokens(deal.name)) | set(_company_tokens(_normalize_domain(deal.domain).split('.')[0]))
+                overlap = len(q_tokens & d_tokens)
+                if overlap >= 2:
+                    add_candidate(deal, 240 + overlap * 10)
+
+        if not candidates:
+            return None
+
+        # Prefer candidates with doc_id when confidence is otherwise similar.
+        best_score, best_deal = max(
+            candidates.values(),
+            key=lambda item: (item[0] + (30 if item[1].doc_id else 0), item[0], bool(item[1].doc_id))
+        )
+
+        # If best exact match has no doc_id, prefer same-root candidate that does.
+        if q_root and best_deal and not best_deal.doc_id:
+            root_with_doc = [
+                (score, deal)
+                for score, deal in candidates.values()
+                if deal.doc_id and _domain_root(deal.domain) == q_root
+            ]
+            if not root_with_doc and q_label:
+                root_with_doc = [
+                    (score, deal)
+                    for score, deal in candidates.values()
+                    if deal.doc_id and _domain_root(deal.domain).split('.', 1)[0] == q_label
+                ]
+            if root_with_doc:
+                _, best_root_deal = max(root_with_doc, key=lambda item: item[0])
+                best_deal = best_root_deal
+                best_score = max(best_score, 300)
+
+        # Guardrail to avoid accidental weak matches.
+        if best_score < 260:
+            return None
+
+        return best_deal
+
+    def _iter_deal_doc_files(self) -> List[Dict]:
+        """List Google Docs that look like deal notes."""
+        query = "mimeType = 'application/vnd.google-apps.document' and trashed = false and name contains 'Deal Notes'"
+        files = []
+        page_token = None
+        while True:
+            response = self._get_drive().files().list(
+                q=query,
+                pageSize=100,
+                pageToken=page_token,
+                fields="nextPageToken, files(id, name, parents, createdTime, modifiedTime)",
+            ).execute()
+            files.extend(response.get("files", []))
+            page_token = response.get("nextPageToken")
+            if not page_token:
+                break
+        return files
+
+    def _score_doc_candidate(self, deal: Deal, file: Dict) -> int:
+        """Prefer docs whose title matches the company/domain after normalization."""
+        name = (file.get("name") or "").lower()
+        name_compact = _compact_text(name)
+        score = 0
+        if "deal notes" in name:
+            score += 20
+
+        domain_root = _domain_root(deal.domain).split('.', 1)[0]
+        deal_name = (deal.name or '').lower()
+        deal_name_compact = _compact_text(deal_name)
+        company_tokens = _company_tokens(deal_name)
+
+        if deal_name and deal_name in name:
+            score += 100
+        if deal_name_compact and deal_name_compact in name_compact:
+            score += 90
+        if domain_root and domain_root in name:
+            score += 80
+        if domain_root and _compact_text(domain_root) in name_compact:
+            score += 60
+        for token in company_tokens:
+            if len(token) >= 3 and token in name:
+                score += 15
+        return score
+
+    def ensure_doc_id(self, query: str) -> Optional[Deal]:
+        """Repair a missing doc_id by searching Drive and updating the local index."""
+        deal = self.find_deal(query)
+        if not deal:
+            return None
+        if deal.doc_id:
+            return deal
+
+        candidates = []
+        for file in self._iter_deal_doc_files():
+            score = self._score_doc_candidate(deal, file)
+            if score <= 0:
+                continue
+            candidates.append((score, file))
+
+        if not candidates:
+            return deal
+
+        best_score, best_file = max(candidates, key=lambda item: item[0])
+        if best_score < 60:
+            return deal
+
+        parents = best_file.get('parents', ['root'])
+        folder_id = parents[0] if parents else 'root'
+        deal.doc_id = best_file['id']
+        deal.folder_id = folder_id
+        deal.folder_path = self._build_folder_path(folder_id)
+        deal.created_time = best_file.get('createdTime', deal.created_time)
+        deal.modified_time = best_file.get('modifiedTime', deal.modified_time)
+        self.index[deal.domain] = deal
+        self._save_index()
+        print(f"🔧 Repaired missing doc_id for {deal.name}: {deal.doc_id}")
+        return deal
     
     def get_deal_by_email(self, email: str) -> Optional[Deal]:
         """Find deal by email address."""

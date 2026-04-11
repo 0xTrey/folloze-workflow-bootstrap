@@ -76,3 +76,52 @@ These cannot be fully automated from a clean machine:
 - `skills/granola-to-deals`
 - `skills/granola-connector`
 - `skills/deal-context-manager`
+
+## Granola -> Deal Docs watchdog
+
+Current runtime behavior for the meeting-sync stack:
+
+- `granola-sync` prefers Granola's local cache when it is fresh, and falls back to the live Granola API when the cache is stale or unavailable.
+- `granola-to-deals` prefers the live API path through `granola-connector`, and repairs missing deal `doc_id` values by searching Google Drive before appending call notes.
+- `granola-to-deals` treats `missing_doc_id` as a tracked non-fatal failure, so one incomplete deal record should not flip the whole sync to `status:"error"`.
+- Both pipelines now write structured status artifacts in addition to plain logs:
+  - `~/Library/Logs/granola-sync/sync.status.json`
+  - `~/Library/Logs/granola-sync/sync-runs.jsonl`
+  - `~/.openclaw/logs/deal-docs-ingestion.status.json`
+  - `~/.openclaw/logs/deal-docs-ingestion.jsonl`
+  - `~/.openclaw/logs/deal-index-health.status.json`
+- Failures raise local macOS notifications and remote watchdog alerts:
+  - Mason Discord: `channel:1480676983041167541`
+  - Email to `trey.harnden@folloze.com` from `mason@elevationengine.co`
+
+Optional alert overrides:
+
+- `GRANOLA_ALERT_DISCORD_TARGET`
+- `GRANOLA_ALERT_EMAIL_TO`
+- `GRANOLA_ALERT_EMAIL_FROM`
+- `GRANOLA_ALERTS_DRY_RUN=1` to exercise alert code without sending live notifications
+
+### Troubleshooting alert semantics
+
+- If `~/.openclaw/logs/deal-docs-ingestion.status.json` ends with `status:"ok"`, the Granola sync completed even if the summary still contains a non-fatal `missing_doc_id`.
+- If Mason says `Granola sync error: unavailable`, check `~/.openclaw/logs/gateway.err.log` for `required secrets are unavailable` before changing the Granola sync code.
+- The `required secrets are unavailable` message comes from OpenClaw gateway startup, usually because a configured provider secret such as `AI_DEEPSEEK_KEY` or `AI_GEMINI_KEY` is missing. That is a gateway/config issue, not a Granola meeting-ingestion bug.
+- For historical context: the April 3, 2026 Mason alerts were a combination of the older wrapper returning exit code `1` for `missing_doc_id` and simultaneous OpenClaw secret failures during gateway restart.
+
+## Manual account sync
+
+Run the same wrapper the scheduler uses, but target one account:
+
+```bash
+GRANOLA_TO_DEALS_ARGS='--since 2026-03-16 --target selector.ai' \
+/bin/bash ~/Projects/folloze-workflow-bootstrap/skills/granola-to-deals/run_orchestrator.sh
+```
+
+Preview without writing:
+
+```bash
+GRANOLA_TO_DEALS_ARGS='--since 2026-03-16 --target selector.ai --dry-run' \
+/bin/bash ~/Projects/folloze-workflow-bootstrap/skills/granola-to-deals/run_orchestrator.sh
+```
+
+This is the preferred repair/backfill path for one company because it preserves the same logs, status files, and alert behavior as the scheduled job.

@@ -16,17 +16,45 @@ Usage:
 """
 
 import json
+import os
 import subprocess
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import List, Dict, Optional, Any
+
+GRANOLA_SYNC_REPO = Path(
+    os.getenv("GRANOLA_SYNC_REPO", str(Path.home() / "Projects" / "granola-sync"))
+)
+if GRANOLA_SYNC_REPO.exists():
+    import sys
+    if str(GRANOLA_SYNC_REPO) not in sys.path:
+        sys.path.insert(0, str(GRANOLA_SYNC_REPO))
+
+try:
+    from granola_api import GranolaAPIClient
+except Exception:  # pragma: no cover - local fallback only
+    GranolaAPIClient = None
 
 
 class GranolaTool:
     """Tool for accessing Granola meeting data."""
     
     def __init__(self):
-        self._check_cli()
+        self.source_name = "cli"
+        self.api_client = None
+
+        if GranolaAPIClient is not None and os.getenv("GRANOLA_SOURCE", "api").lower() != "cli":
+            try:
+                candidate = GranolaAPIClient()
+                # Prime the cache so we know the API is actually reachable.
+                candidate.list_documents(refresh=True)
+                self.api_client = candidate
+                self.source_name = "api"
+            except Exception:
+                self.api_client = None
+
+        if self.api_client is None:
+            self._check_cli()
     
     def _check_cli(self):
         """Verify granola CLI is available."""
@@ -75,6 +103,14 @@ class GranolaTool:
         Returns:
             List of meeting dictionaries
         """
+        if self.api_client is not None:
+            if since:
+                return self.api_client.get_meetings(
+                    since=since.strftime('%Y-%m-%d'),
+                    limit=limit,
+                )
+            return self.api_client.get_meetings(limit=limit)
+
         data = self._run(['meetings'])
         if not data:
             return []
@@ -117,6 +153,11 @@ class GranolaTool:
         Returns:
             Full meeting dictionary or None if not found
         """
+        if self.api_client is not None:
+            try:
+                return self.api_client.get_meeting_full(meeting_id)
+            except Exception:
+                return None
         return self._run(['full', meeting_id])
     
     def get_meetings_with_details(self, since: Optional[datetime] = None) -> List[Dict]:
@@ -156,6 +197,21 @@ class GranolaTool:
         Returns:
             List of matching meetings
         """
+        if self.api_client is not None:
+            query_lc = query.lower()
+            results = []
+            for meeting in self.api_client.get_meetings():
+                hay = " ".join(
+                    [
+                        meeting.get('title', ''),
+                        " ".join(a.get('email', '') for a in meeting.get('attendees', [])),
+                        " ".join(a.get('name', '') for a in meeting.get('attendees', [])),
+                    ]
+                ).lower()
+                if query_lc in hay:
+                    results.append(meeting)
+            return results[:limit]
+
         data = self._run(['search', query])
         if not data:
             return []

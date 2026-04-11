@@ -16,7 +16,7 @@ import json
 import os
 import re
 import sys
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
@@ -34,6 +34,26 @@ from google.auth.transport.requests import Request
 
 DEFAULT_TOKEN_PATH = Path.home() / ".config" / "openclaw" / "google" / "token.json"
 DEALS_DATA_DIR = Path.home() / ".openclaw" / "deals"
+DEAL_INDEX_PATH = Path.home() / ".openclaw" / "deal-index.json"
+ALIAS_MAP_PATH = Path.home() / ".openclaw" / "domain-aliases.json"
+HEALTH_STATUS_PATH = Path.home() / ".openclaw" / "logs" / "deal-index-health.status.json"
+
+NON_ACTIONABLE_STATUSES = {
+    "dead",
+    "dead_opp",
+    "dead-opportunity",
+    "partner",
+    "prospect_future",
+    "future_meeting",
+    "pre_meeting",
+    "ignore",
+    "inactive",
+}
+
+# Failures with these error codes are tracked but do not fail the whole run.
+NON_FATAL_ERROR_CODES = {
+    "missing_doc_id",
+}
 
 
 def get_docs_service(token_path: Optional[Path] = None):
@@ -539,6 +559,7 @@ def process_meeting(meeting: Dict, tool: GranolaTool, deal_manager: DealContextM
         "json_updated": False,
         "domain": None,
         "doc_id": None,
+        "error": None,
     }
 
     # Extract domains from attendees
@@ -566,9 +587,21 @@ def process_meeting(meeting: Dict, tool: GranolaTool, deal_manager: DealContextM
 
     result['matched'] = True
     result['domain'] = matched_domain
+    if not matched_deal.doc_id:
+        matched_deal = deal_manager.ensure_doc_id(matched_domain) or matched_deal
     result['doc_id'] = matched_deal.doc_id
 
+    deal_status = (getattr(matched_deal, 'status', '') or '').strip().lower()
     print(f"  ✅ Matched to deal: {matched_deal.name} ({matched_domain})")
+
+    if not matched_deal.doc_id:
+        if deal_status in NON_ACTIONABLE_STATUSES:
+            print(f"  ⚠️  Missing doc_id but deal status is '{deal_status}' — skipping without failure")
+            result['skip_reason'] = f"missing_doc_id:{deal_status}"
+            return result
+        print(f"  ❌ Matched deal is missing doc_id and no existing deal doc was found")
+        result['error'] = 'missing_doc_id'
+        return result
 
     # Format the note data
     preview_text, structured_data, summary_parts, attendee_emails, action_items = format_call_note(meeting, tool)
@@ -590,6 +623,8 @@ def process_meeting(meeting: Dict, tool: GranolaTool, deal_manager: DealContextM
 
         if success:
             print(f"  ✅ Appended to Google Doc")
+        else:
+            result['error'] = 'append_failed'
 
     # Update local JSON (even in dry-run, show what would happen)
     if not dry_run and result['appended']:
@@ -599,6 +634,145 @@ def process_meeting(meeting: Dict, tool: GranolaTool, deal_manager: DealContextM
             print(f"  ✅ Updated local JSON: {DEALS_DATA_DIR}/{matched_domain}.json")
 
     return result
+
+
+def _normalize_domain(value: str) -> str:
+    if not value:
+        return ""
+    v = value.strip().lower()
+    v = re.sub(r'^https?://', '', v)
+    v = v.split('/', 1)[0]
+    v = v.split('?', 1)[0]
+    v = v.split('#', 1)[0]
+    if v.startswith('www.'):
+        v = v[4:]
+    return v.strip('.')
+
+
+def run_preflight_index_health() -> Dict:
+    now = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+    payload = {
+        "event": "preflight_index_health",
+        "checked_at": now,
+        "deal_index_path": str(DEAL_INDEX_PATH),
+        "alias_map_path": str(ALIAS_MAP_PATH),
+        "issues": [],
+    }
+
+    if not DEAL_INDEX_PATH.exists():
+        payload["severity"] = "critical"
+        payload["issues"].append({"code": "missing_deal_index", "message": "deal-index.json does not exist"})
+        print(json.dumps(payload, sort_keys=True))
+        return payload
+
+    try:
+        raw = json.loads(DEAL_INDEX_PATH.read_text())
+        deals = raw.get("deals", {})
+    except Exception as e:
+        payload["severity"] = "critical"
+        payload["issues"].append({"code": "deal_index_unreadable", "message": str(e)})
+        print(json.dumps(payload, sort_keys=True))
+        return payload
+
+    path_like_domains = [d for d in deals.keys() if '/' in d]
+    malformed_domains = [d for d in deals.keys() if _normalize_domain(d) != d.lower().strip()]
+    active_missing_doc = [
+        d for d, v in deals.items()
+        if (v.get("status") or "active").lower() == "active" and not v.get("doc_id")
+    ]
+
+    alias_count = 0
+    if ALIAS_MAP_PATH.exists():
+        try:
+            alias_payload = json.loads(ALIAS_MAP_PATH.read_text())
+            aliases = alias_payload.get("aliases", alias_payload if isinstance(alias_payload, dict) else {})
+            alias_count = len(aliases) if isinstance(aliases, dict) else 0
+        except Exception as e:
+            payload["issues"].append({"code": "alias_map_unreadable", "message": str(e)})
+    else:
+        payload["issues"].append({"code": "alias_map_missing", "message": "No domain alias file found (optional but recommended)"})
+
+    if path_like_domains:
+        payload["issues"].append({
+            "code": "path_like_domains",
+            "count": len(path_like_domains),
+            "examples": path_like_domains[:10],
+            "message": "Domain keys contain path segments",
+        })
+
+    if malformed_domains:
+        payload["issues"].append({
+            "code": "malformed_domain_keys",
+            "count": len(malformed_domains),
+            "examples": malformed_domains[:10],
+            "message": "Domain keys need normalization",
+        })
+
+    if active_missing_doc:
+        payload["issues"].append({
+            "code": "active_missing_doc_id",
+            "count": len(active_missing_doc),
+            "examples": active_missing_doc[:10],
+            "message": "Active deals missing doc_id",
+        })
+
+    payload["deal_count"] = len(deals)
+    payload["last_sf_sync"] = raw.get("last_sf_sync")
+    payload["alias_count"] = alias_count
+
+    if any(i["code"] in {"missing_deal_index", "deal_index_unreadable"} for i in payload["issues"]):
+        payload["severity"] = "critical"
+    elif payload["issues"]:
+        payload["severity"] = "warn"
+    else:
+        payload["severity"] = "ok"
+
+    HEALTH_STATUS_PATH.parent.mkdir(parents=True, exist_ok=True)
+    HEALTH_STATUS_PATH.write_text(json.dumps(payload, indent=2) + "\n")
+    print(json.dumps(payload, sort_keys=True))
+    return payload
+
+
+def emit_run_summary(tool: GranolaTool, since: datetime, args, results: List[Dict], reason: Optional[str] = None, preflight: Optional[Dict] = None):
+    matched = sum(1 for r in results if r['matched'])
+    appended = sum(1 for r in results if r['appended'])
+    json_updated = sum(1 for r in results if r['json_updated'])
+    failures = [r for r in results if r.get('error')]
+    non_fatal_failures = [r for r in failures if r.get('error') in NON_FATAL_ERROR_CODES]
+    fatal_failures = [r for r in failures if r.get('error') not in NON_FATAL_ERROR_CODES]
+
+    print("=" * 50)
+    print("SUMMARY")
+    print("=" * 50)
+    print(f"Total meetings: {len(results)}")
+    print(f"Matched to deals: {matched}")
+    print(f"Appended to docs: {appended}")
+    print(f"Local JSON updated: {json_updated}")
+    print(f"Failures: {len(failures)} (fatal={len(fatal_failures)}, non_fatal={len(non_fatal_failures)})")
+
+    summary = {
+        "event": "run_summary",
+        "source": tool.source_name,
+        "since": since.isoformat(),
+        "target": args.target,
+        "dry_run": args.dry_run,
+        "force": args.force,
+        "meetings_total": len(results),
+        "matched_total": matched,
+        "appended_total": appended,
+        "json_updated_total": json_updated,
+        "failure_total": len(failures),
+        "fatal_failure_total": len(fatal_failures),
+        "non_fatal_failure_total": len(non_fatal_failures),
+        "failures": failures,
+    }
+    if preflight:
+        summary["preflight_severity"] = preflight.get("severity")
+        summary["preflight_issue_total"] = len(preflight.get("issues", []))
+    if reason:
+        summary["reason"] = reason
+    print(json.dumps(summary, sort_keys=True))
+    return 1 if fatal_failures else 0
 
 
 def main():
@@ -637,14 +811,18 @@ def main():
         print(f"❌ Failed to initialize: {e}")
         return 1
 
+    # Preflight health check (non-blocking visibility; separate from run fatality).
+    preflight = run_preflight_index_health()
+
     # Get meetings with full details (includes panels/summaries)
     print(f"\n📅 Fetching meetings from Granola...")
     meetings = tool.get_meetings_with_details(since=since)
     print(f"   Found {len(meetings)} meetings")
+    print(f"   Source: {tool.source_name}")
 
     if not meetings:
         print("   No meetings to process")
-        return 0
+        return emit_run_summary(tool, since, args, [], reason="no_meetings", preflight=preflight)
 
     # Process each meeting
     print(f"\n📝 Processing meetings...\n")
@@ -665,22 +843,9 @@ def main():
         result = process_meeting(meeting, tool, deal_manager, docs_service, args.dry_run, args.force)
         results.append(result)
         print()
-
-    # Summary
-    print("=" * 50)
-    print("SUMMARY")
-    print("=" * 50)
-
-    matched = sum(1 for r in results if r['matched'])
-    appended = sum(1 for r in results if r['appended'])
-    json_updated = sum(1 for r in results if r['json_updated'])
-
-    print(f"Total meetings: {len(results)}")
-    print(f"Matched to deals: {matched}")
-    print(f"Appended to docs: {appended}")
-    print(f"Local JSON updated: {json_updated}")
-
-    return 0
+    if not results:
+        return emit_run_summary(tool, since, args, [], reason="no_target_matches", preflight=preflight)
+    return emit_run_summary(tool, since, args, results, preflight=preflight)
 
 
 if __name__ == "__main__":

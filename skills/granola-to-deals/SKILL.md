@@ -22,10 +22,14 @@ Sync Granola meeting notes to your Deal Docs automatically.
 ## What It Does
 
 1. **Queries Granola** for meetings (today, last N days, or since date)
+   - prefers the live API path
+   - falls back to older local/CLI sources only when needed
 2. **Extracts domains** from attendee emails to identify the company
 3. **Matches to deal docs** using deal-index.json
-4. **Appends to Google Doc** in the "Call Notes" section (most recent first)
-5. **Updates local JSON** with structured meeting data for queries
+4. **Repairs missing `doc_id` values** by searching Google Drive when a matched deal index entry is incomplete
+5. **Appends to Google Doc** in the "Call Notes" section (most recent first)
+6. **Updates local JSON** with structured meeting data for queries
+7. **Writes structured status files** and raises alerts on failure through the wrapper path
 
 ## Output Format
 
@@ -71,8 +75,27 @@ python3 granola_to_deals.py --days 3
 # Process specific date range
 python3 granola_to_deals.py --since 2026-02-10
 
+# Process a single company
+python3 granola_to_deals.py --since 2026-02-10 --target ocrolus.com
+
 # Preview without writing (dry run)
 python3 granola_to_deals.py --today --dry-run
+```
+
+### Wrapper (preferred for manual prod runs)
+
+Use the wrapper when you want the same logs, status files, and failure alerts as the scheduled job:
+
+```bash
+GRANOLA_TO_DEALS_ARGS='--since 2026-03-16 --target selector.ai' \
+/bin/bash /Users/treyharnden/Projects/folloze-workflow-bootstrap/skills/granola-to-deals/run_orchestrator.sh
+```
+
+Dry-run:
+
+```bash
+GRANOLA_TO_DEALS_ARGS='--since 2026-03-16 --target selector.ai --dry-run' \
+/bin/bash /Users/treyharnden/Projects/folloze-workflow-bootstrap/skills/granola-to-deals/run_orchestrator.sh
 ```
 
 ### Cron (Daily)
@@ -82,7 +105,7 @@ Add to `~/.openclaw/cron/`:
 {
   "name": "granola-daily-sync",
   "schedule": {"kind": "cron", "expr": "0 9 * * *", "tz": "America/Chicago"},
-  "command": "python3 /Users/treyharnden/.openclaw/workspace/skills/granola-to-deals/granola_to_deals.py --today"
+  "command": "GRANOLA_TO_DEALS_ARGS='--today' /bin/bash /Users/treyharnden/Projects/folloze-workflow-bootstrap/skills/granola-to-deals/run_orchestrator.sh"
 }
 ```
 
@@ -104,8 +127,13 @@ Add to `~/.openclaw/cron/`:
 ## File Locations
 
 - **Script:** `skills/granola-to-deals/granola_to_deals.py`
+- **Wrapper:** `skills/granola-to-deals/run_orchestrator.sh`
 - **Local deal data:** `~/.openclaw/deals/{domain}.json`
 - **Deal index:** `~/.openclaw/deal-index.json`
+- **Status file:** `~/.openclaw/logs/deal-docs-ingestion.status.json`
+- **Run history:** `~/.openclaw/logs/deal-docs-ingestion.jsonl`
+- **Plain log:** `~/.openclaw/logs/deal-docs-ingestion.log`
+- **Preflight health:** `~/.openclaw/logs/deal-index-health.status.json`
 
 ## Integration
 
@@ -133,10 +161,33 @@ for json_file in deals_dir.glob("*.json"):
 
 ## Requirements
 
-- Granola CLI installed (`brew install granola`)
+- `~/Projects/granola-sync` available for live Granola API access
+- Granola CLI installed (`brew install granola`) for older fallback paths
 - Google OAuth token (`~/.config/openclaw/google/token.json`)
 - Deal index built (`deal-context-manager refresh`)
 - Python dependencies: `google-auth`, `google-api-python-client`
+
+## Failure alerts
+
+The wrapper path raises:
+
+- local macOS notifications
+- a Mason Discord alert to `channel:1480676983041167541`
+- an email to `trey.harnden@folloze.com` from `mason@elevationengine.co`
+
+Optional overrides:
+
+- `GRANOLA_ALERT_DISCORD_TARGET`
+- `GRANOLA_ALERT_EMAIL_TO`
+- `GRANOLA_ALERT_EMAIL_FROM`
+- `GRANOLA_ALERTS_DRY_RUN=1` for safe transport tests
+
+## Troubleshooting
+
+- `missing_doc_id` is a tracked non-fatal failure. It should appear in the run summary, but it should not make the wrapper emit `status:"error"`.
+- If the wrapper ends `status:"ok"` but Mason still says `unavailable`, inspect `~/.openclaw/logs/gateway.err.log` for `required secrets are unavailable`.
+- That `required secrets are unavailable` message comes from OpenClaw gateway startup, not from Granola ingestion. The usual cause is a missing provider secret such as `AI_DEEPSEEK_KEY` or `AI_GEMINI_KEY`.
+- April 3, 2026 is the reference incident for this distinction: the old wrapper still treated `missing_doc_id` as fatal, and the gateway was also failing to restart because provider secrets were missing.
 
 ## Future Enhancements
 
